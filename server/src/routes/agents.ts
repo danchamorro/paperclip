@@ -5153,6 +5153,9 @@ export function agentRoutes(
     const existing = await getAccessibleResource(req, res, svc.getById(id), "Agent not found");
     if (!existing) return;
 
+    // Reject configuration writes before normalization or binding work.
+    if (req.actor.type === "agent") await assertCanUpdateAgent(req, existing);
+
     if (hasOwn(req.body as object, "permissions")) {
       res.status(422).json({ error: "Use /api/agents/:id/permissions for permission changes" });
       return;

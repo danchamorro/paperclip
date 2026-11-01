@@ -1,6 +1,7 @@
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { and, eq } from "drizzle-orm";
 import {
+  approvals,
   issues,
   issueThreadInteractions,
   toolActionRequests,
@@ -9,6 +10,7 @@ import {
   type Db,
 } from "@paperclipai/db";
 import { conflict, forbidden, notFound } from "../errors.js";
+import { approvalResolutionRecords } from "../lib/approval-records.js";
 import { assertIssueThreadInteractionResolverAudience } from "./issue-thread-interaction-resolution.js";
 import { emitConnectionInvoked } from "./connector-telemetry.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
@@ -28,6 +30,7 @@ export async function commitToolActionReview(
     interactionId?: string;
     decision: "approved" | "rejected";
     rememberAction?: boolean;
+    approveLinkedFormalApproval?: boolean;
     reason?: string;
     actor: { agentId?: string | null; userId?: string | null };
   },
@@ -138,6 +141,38 @@ export async function commitToolActionReview(
       });
       if (interaction.status !== "pending")
         throw conflict("This review has already been resolved");
+    }
+    // A task-card approval is one human decision. Keep its formal approval,
+    // audit event and action/interaction changes in the same transaction.
+    if (input.decision === "approved" && input.approveLinkedFormalApproval === true && current.approvalId) {
+      if (!input.issueId || !input.interactionId || !input.actor.userId || input.actor.userId === "board") {
+        throw forbidden("A signed-in human must approve this task action");
+      }
+      const [formal] = await tx.select().from(approvals)
+        .where(and(eq(approvals.id, current.approvalId), eq(approvals.companyId, input.companyId)))
+        .for("update");
+      const payload = formal?.payload;
+      if (!formal || formal.type !== "request_board_approval" ||
+          payload?.source !== "tool_gateway" || payload.actionRequestId !== current.id ||
+          payload.invocationId !== current.invocationId || payload.tool !== invocation.toolName ||
+          payload.argumentsHash !== current.canonicalArgumentsHash ||
+          invocation.argumentsHash !== current.canonicalArgumentsHash) {
+        throw conflict("Formal approval does not match this stored action; request a new review");
+      }
+      if (formal.status !== "pending" && formal.status !== "approved") {
+        throw conflict("Formal approval is no longer pending; request a new review");
+      }
+      const { applied } = await approvalResolutionRecords(tx as unknown as Db).resolveApproval(
+        formal.id, "approved", input.actor.userId,
+        "Approved with the task's Approve & run action",
+      );
+      if (applied) {
+        await logActivity(tx as unknown as Db, {
+          companyId: input.companyId, actorType: "user", actorId: input.actor.userId,
+          action: "approval.approved", entityType: "approval", entityId: formal.id,
+          details: { type: formal.type, actionRequestId: current.id, linkedIssueIds: [input.issueId] },
+        }, publications);
+      }
     }
     const now = new Date();
     const [updated] = await tx

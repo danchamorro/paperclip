@@ -1,3 +1,4 @@
+import { ToolGatewayHttpError } from "../services/tool-gateway.js";
 import { parseObject } from "../adapters/utils.js";
 import { enqueueFastResponse } from "../services/fast-responses.js";
 import { hasRequiredWorkspaceRecovery, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "../services/workspace-restore-recovery-state.js";
@@ -33,7 +34,7 @@ import {
   rejectSteeredIdentity,
 } from "../services/run-identity.js";
 import { createHash, randomUUID } from "node:crypto";
-import { Router, type Request, type Response } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import multer from "multer";
 import { z } from "zod";
 import { and, asc, desc, eq, inArray, isNull, notInArray, sql, type SQL } from "drizzle-orm";
@@ -3414,6 +3415,7 @@ export function issueRoutes(
       actor: { agentId?: string | null; userId?: string | null };
     }) => Promise<unknown>;
     approveToolActionRequest?: (input: {
+      approveLinkedFormalApproval?: boolean;
       rememberAction?: boolean;
       companyId: string;
       issueId: string;
@@ -16893,6 +16895,7 @@ export function issueRoutes(
           issueId: issue.id,
           interactionId: current.id,
           actionRequestId: current.payload.toolAction.actionRequestId,
+          approveLinkedFormalApproval: true,
           rememberAction: req.body.rememberAction === true,
           actor: {
             agentId: actor.agentId,
@@ -19584,5 +19587,13 @@ export function issueRoutes(
     res.json({ ok: true });
   });
 
+  // Expected tool-review conflicts must preserve their actionable status/message.
+  router.use((err: unknown, _req: Request, _res: Response, next: NextFunction) => {
+    if (err instanceof ToolGatewayHttpError) {
+      next(new HttpError(err.status, err.message, { ...err.details, code: err.reasonCode }));
+      return;
+    }
+    next(err);
+  });
   return router;
 }

@@ -291,6 +291,8 @@ async function startNetworkAllowlistProxy(
   });
   const sockets = new Set<net.Socket>();
   server.on("connection", (socket) => {
+    // A disconnected CONNECT client must not crash the host controller.
+    socket.on("error", () => socket.destroy());
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
   });

@@ -94,7 +94,9 @@
     "connections:ingest-app-definitions": "node scripts/ingest-app-definitions.mjs",
     "test:lifecycle-baseline": "node tests/lifecycle-baseline/run.mjs",
     "test:lifecycle-baseline:support": "node --test tests/lifecycle-baseline/report.test.mjs",
-    "test:lifecycle-baseline:typecheck": "tsc -p tests/lifecycle-baseline/tsconfig.json"
+    "test:lifecycle-baseline:typecheck": "tsc -p tests/lifecycle-baseline/tsconfig.json",
+    "test:fleet": "node cli/node_modules/tsx/dist/cli.mjs scripts/fleet/agent-config-regression.mjs && node cli/node_modules/tsx/dist/cli.mjs scripts/fleet/approval-regression.mjs && vitest run --project @paperclipai/server server/src/__tests__/fleet-human-agent-control.test.ts",
+    "test:fleet:linux": "node cli/node_modules/tsx/dist/cli.mjs scripts/fleet/proxy-disconnect-regression.mjs && python3 scripts/fleet/test-bwrap-compat.py"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",

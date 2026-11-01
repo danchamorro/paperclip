@@ -43,7 +43,7 @@ describeDatabase("new agent configuration defaults", () => {
     await cleanup?.();
   });
 
-  it("grants standard new agents direct peer configuration, but keeps restricted agents narrow", async () => {
+  it("retains standard grants without overriding fleet human-only configuration policy", async () => {
     const companyId = randomUUID();
     await db.insert(companies).values({
       id: companyId,
@@ -123,7 +123,7 @@ describeDatabase("new agent configuration defaults", () => {
       resource: { type: "agent", agentId: peer.id, companyId },
       scope: { requiresChangeGrant: true },
     });
-    expect(decision).toMatchObject({ allowed: true, reason: "allow_direct_change" });
+    expect(decision).toMatchObject({ allowed: false, reason: "deny_policy_restricted" });
 
     // A later ordinary self-update must not recreate a grant removed by an operator.
     await db.delete(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, standard.id));

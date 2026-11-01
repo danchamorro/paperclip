@@ -24,6 +24,11 @@ import { toolAccessService } from "../services/tool-access.js";
 import { waitForPendingRunFailureReports } from "../services/run-failure-report.js";
 import { configureAgentLifecycle } from "../services/agent-lifecycle.js";
 
+// These upstream integration cases exercise connection inheritance below the
+// fleet's human-only admission boundary. Keep their original assertions intact;
+// fleet-human-agent-control.test.ts covers the real, unmocked HTTP boundary.
+vi.mock("../services/fleet-policy.js", () => ({ requiresHumanAgentControl: () => false }));
+
 const captureRunFailure = vi.hoisted(() => vi.fn());
 vi.mock("../sentry.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../sentry.js")>(),

@@ -9608,6 +9608,7 @@ export function createToolGatewayService(
     async approveActionRequest(input: {
       companyId: string;
       rememberAction?: boolean;
+      approveLinkedFormalApproval?: boolean;
       issueId?: string;
       interactionId?: string;
       actionRequestId: string;
@@ -9742,7 +9743,12 @@ export function createToolGatewayService(
             ),
           )
           .limit(1);
-        if (!formalApproval || formalApproval.status !== "approved") {
+        // Only the authorized task-card path combines the two human decisions.
+        // The shared transaction locks and validates the linked formal record.
+        const mayApproveTogether = input.approveLinkedFormalApproval === true &&
+          input.issueId && input.interactionId &&
+          actionRequest.status === "pending" && formalApproval?.status === "pending";
+        if ((!formalApproval || formalApproval.status !== "approved") && !mayApproveTogether) {
           throw new ToolGatewayHttpError(
             409,
             "Tool action request requires formal board approval before execution",

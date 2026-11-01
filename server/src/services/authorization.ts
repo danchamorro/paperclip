@@ -47,6 +47,7 @@ import {
 import { logger } from "../middleware/logger.js";
 import { normalizeAgentPermissions } from "../lib/agent-permissions.js";
 import { grantsForHumanRole, normalizeHumanRole } from "./company-member-roles.js";
+import { requiresHumanAgentControl } from "./fleet-policy.js";
 
 export type AuthorizationActor =
   {
@@ -1631,6 +1632,12 @@ export function authorizationService(db: Db | DbTransaction) {
     resource: AuthorizationResource;
     scope?: Record<string, unknown> | null;
   }): Promise<AuthorizationDecision> {
+    // Fleet policy: configuration and hiring remain human-controlled, including
+    // self-access, inherited grants and consent-based configuration changes.
+    if (requiresHumanAgentControl(input.actor.type, input.action)) {
+      return deny({ action: input.action, reason: "deny_policy_restricted",
+        explanation: "Agent creation and configuration are controlled by human operators on this instance." });
+    }
     const permissionKey = permissionForAction(input.action);
     const companyId = companyIdForResource(input.resource);
 

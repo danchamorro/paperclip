@@ -313,7 +313,7 @@ describeEmbeddedPostgres("authorization service", () => {
     });
   });
 
-  it("enforces direct or consented suggest grants for agent configuration changes", async () => {
+  it("keeps fleet agent configuration human-only despite direct or consented grants", async () => {
     const company = await createCompany(db, "AgentChangeGrant");
     const directAgent = await createAgent(db, company.id);
     const suggestAgent = await createAgent(db, company.id);
@@ -336,9 +336,8 @@ describeEmbeddedPostgres("authorization service", () => {
       resource: { type: "agent", companyId: company.id, agentId: targetAgent.id },
       scope: { requiresChangeGrant: true },
     })).resolves.toMatchObject({
-      allowed: true,
-      reason: "allow_direct_change",
-      grant: { permissionKey: "agents:configure" },
+      allowed: false,
+      reason: "deny_policy_restricted",
     });
 
     await expect(authz.decide({
@@ -348,8 +347,7 @@ describeEmbeddedPostgres("authorization service", () => {
       scope: { requiresChangeGrant: true },
     })).resolves.toMatchObject({
       allowed: false,
-      reason: "deny_missing_consent",
-      grant: { permissionKey: "agents:suggest-changes" },
+      reason: "deny_policy_restricted",
     });
 
     await expect(authz.decide({
@@ -358,9 +356,8 @@ describeEmbeddedPostgres("authorization service", () => {
       resource: { type: "agent", companyId: company.id, agentId: targetAgent.id },
       scope: { requiresChangeGrant: true, consentedChange: true },
     })).resolves.toMatchObject({
-      allowed: true,
-      reason: "allow_consented_change",
-      grant: { permissionKey: "agents:suggest-changes" },
+      allowed: false,
+      reason: "deny_policy_restricted",
     });
 
     await expect(authz.decide({
@@ -370,7 +367,7 @@ describeEmbeddedPostgres("authorization service", () => {
       scope: { requiresChangeGrant: true },
     })).resolves.toMatchObject({
       allowed: false,
-      reason: "deny_no_grant",
+      reason: "deny_policy_restricted",
     });
   });
 
@@ -1174,7 +1171,7 @@ describeEmbeddedPostgres("authorization service", () => {
       action: "agent_config:update",
       resource: { type: "agent", companyId: company.id, agentId: targetAgent.id },
       scope: { requiresChangeGrant: true, consentedChange: true },
-    })).resolves.toMatchObject({ allowed: false, reason: "deny_low_trust_boundary" });
+    })).resolves.toMatchObject({ allowed: false, reason: "deny_policy_restricted" });
 
     await expect(authz.decide({
       actor,
@@ -1973,7 +1970,7 @@ describeEmbeddedPostgres("authorization service", () => {
     });
   });
 
-  it("preserves legacy CEO agent creator authority", async () => {
+  it("denies legacy CEO agent creator authority under fleet policy", async () => {
     const company = await createCompany(db, "Legacy");
     const actorAgent = await createAgent(db, company.id, { role: "ceo" });
 
@@ -1984,12 +1981,12 @@ describeEmbeddedPostgres("authorization service", () => {
     });
 
     expect(decision).toMatchObject({
-      allowed: true,
-      reason: "allow_legacy_agent_creator",
+      allowed: false,
+      reason: "deny_policy_restricted",
     });
   });
 
-  it("grants hire authority through the persisted new-agent default", async () => {
+  it("denies agent hiring despite the persisted new-agent grant", async () => {
     const company = await createCompany(db, "DefaultHire");
     // The service create path persists the create-context default
     // (canCreateAgents: true for standard trust); enforcement reads it back.
@@ -2005,8 +2002,8 @@ describeEmbeddedPostgres("authorization service", () => {
     });
 
     expect(decision).toMatchObject({
-      allowed: true,
-      reason: "allow_legacy_agent_creator",
+      allowed: false,
+      reason: "deny_policy_restricted",
     });
   });
 
@@ -2022,11 +2019,11 @@ describeEmbeddedPostgres("authorization service", () => {
 
     expect(decision).toMatchObject({
       allowed: false,
-      reason: "deny_missing_grant",
+      reason: "deny_policy_restricted",
     });
   });
 
-  it("denies agent creation for a low-trust boundary even with explicit canCreateAgents", async () => {
+  it("denies agent creation under fleet policy even with explicit canCreateAgents", async () => {
     const company = await createCompany(db, "LowTrustHireDenied");
     const project = await createProject(db, company.id, "Contained");
     const actorAgent = await createAgent(db, company.id, {
@@ -2050,7 +2047,7 @@ describeEmbeddedPostgres("authorization service", () => {
 
     expect(decision).toMatchObject({
       allowed: false,
-      reason: "deny_low_trust_boundary",
+      reason: "deny_policy_restricted",
     });
   });
 
