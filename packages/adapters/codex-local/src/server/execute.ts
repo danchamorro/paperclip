@@ -2,6 +2,7 @@ import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provid
 import { createUsageCheckpointLog } from "@paperclipai/adapter-utils/usage-checkpoint";
 import fs from "node:fs/promises";
 import path from "node:path";
+import os from "node:os";
 import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, resolveManagedOpenAiBilling, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
@@ -999,12 +1000,35 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const biller = managedBilling?.biller ?? resolveCodexBiller(effectiveEnv, billingType);
     const networkScope = parseLocalProcessNetworkScope(config.networkScope);
     const filesystemScope = parseLocalProcessFilesystemScope(config.filesystemScope);
+    // The controller replaces these roots after resolving the assigned workspace;
+    // they are not agent-supplied filesystemExtraPaths. Match the native runner's
+    // Git projection so a worktree can update its index and object database.
+    const gitMetadataRoots: string[] = [];
+    if (!executionTargetIsRemote && filesystemScope === "workspace") {
+      const roots: unknown = JSON.parse(env.PAPERCLIP_GIT_METADATA_ROOTS || "[]");
+      if (!Array.isArray(roots) || roots.some(root => typeof root !== "string" || !path.isAbsolute(root) || path.resolve(root) === path.parse(root).root)) {
+        throw new Error("Invalid controller Git metadata roots");
+      }
+      gitMetadataRoots.push(...new Set(roots.map(root => path.resolve(root))));
+    }
+    const gitLauncherDir = !executionTargetIsRemote && filesystemScope === "workspace"
+      ? env.PAPERCLIP_GITHUB_LAUNCHER_DIR : undefined;
+    if (gitLauncherDir && gitLauncherDir !== path.join(os.tmpdir(), "paperclip-github-runtime", runId)) {
+      throw new Error("Managed GitHub launcher does not belong to this run");
+    }
     const localProcessSandbox: LocalProcessSandboxOptions | null =
       (filesystemScope || networkScope) && !executionTargetIsRemote
         ? {
             workspaceDir: effectiveExecutionCwd,
             filesystemScope,
-            managedPaths: [{ path: effectiveCodexHome, access: "rw" }],
+            managedPaths: [
+              { path: effectiveCodexHome, access: "rw" },
+              ...gitMetadataRoots.map(root => ({ path: root, access: "rw" as const })),
+              ...(gitLauncherDir ? [
+                { path: gitLauncherDir, access: "ro" as const },
+                { path: path.join(gitLauncherDir, "gh-config"), access: "rw" as const },
+              ] : []),
+            ],
             extraPaths: parseLocalProcessSandboxExtraPaths(config.filesystemExtraPaths),
             pathAliases: targetWorkspaceRealization?.mode === "copy"
               ? targetWorkspaceRealization.pathAliases
@@ -1231,14 +1255,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         },
       );
       const args = execArgs.args;
+      // The inner Codex sandbox must agree with the outer filesystem boundary.
+      for (const root of gitMetadataRoots) args.unshift("--add-dir", root);
       const pricingContext = execArgs.fastModeApplied ? { serviceTier: "fast" } : undefined;
       if (ctx.agentIdentity) {
         const identityNames = ["PAPERCLIP_AGENT_KEY_ID", "PAPERCLIP_AGENT_PUBLIC_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY"];
         const shellKeys = [...new Set([
           "PATH", "HOME", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TEMP", "TMP", "CODEX_HOME",
+          // The local sandbox adds these after this allowlist is built. Keep
+          // its proxy available to shell tools without saving worker-only URLs
+          // in agent config (the startup probe runs outside that sandbox).
+          ...(config.networkScope === "allowlist"
+            ? ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"]
+            : []),
           // Keep Codex's default secret-name exclusions except for the scoped
           // Paperclip API token used by the agent skill. Never include host env.
-          ...Object.keys(env).filter(key => key === "PAPERCLIP_API_KEY" || !/key|secret|token/i.test(key)),
+          ...Object.keys(env).filter(key => key === "PAPERCLIP_API_KEY" || key === "PAPERCLIP_GITHUB_BROKER_TOKEN" || !/key|secret|token/i.test(key)),
           ...identityNames,
         ])];
         args.unshift("-c", "features.shell_snapshot=false", "-c", 'shell_environment_policy.inherit="all"', "-c", "shell_environment_policy.ignore_default_excludes=true",

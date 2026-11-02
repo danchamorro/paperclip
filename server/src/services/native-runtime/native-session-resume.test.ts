@@ -28,6 +28,7 @@ import {
   CodexAppServerDriver,
   HarnessDriverBackend,
   createCodexTaskEnvelope,
+  resolveCodexCommand,
   createRunnerdCodexTransport as createCapabilityRunnerdCodexTransport,
 } from "@paperclipai/paperclip-runner";
 import {
@@ -71,6 +72,8 @@ import {
   selectNativeSessionResumeRun,
 } from "./native-session-resume.js";
 import { nativeRuntimeContextFixture } from "./runtime-context.test-fixture.js";
+
+vi.mock("../../../../packages/paperclip-runner/src/drivers/codex/codex-command.js", { spy: true });
 
 const companyId = "10000000-0000-4000-8000-000000000001";
 const issueId = "20000000-0000-4000-8000-000000000002";
@@ -732,6 +735,7 @@ const recoveryFakeCodex = resolve(
     const workspace = join(scratch, "workspace");
     const sourceHome = join(scratch, "source-home");
     const previousStateBase = process.env.PAPERCLIP_RUNNER_STATE_DIR;
+    const resolveFixtureCodex = vi.mocked(resolveCodexCommand);
     const server = createServer();
     let firstSession: NativeSession | undefined;
     const ownedSessions = new Set<NativeSession>();
@@ -759,6 +763,9 @@ const recoveryFakeCodex = resolve(
         `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(recoveryFakeCodex)} "$CODEX_HOME/fake-state.json" 16\n`,
       );
       await chmod(command, 0o700);
+      // Installed Codex dependencies take precedence over PATH. Pin only the
+      // provider boundary so this recovery test can never launch the real CLI.
+      resolveFixtureCodex.mockReturnValue(command);
       await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
       const address = server.address();
       if (!address || typeof address === "string")
@@ -1219,7 +1226,9 @@ const recoveryFakeCodex = resolve(
         .from(issues)
         .where(eq(issues.id, issueId));
       expect(task).toEqual({ id: issueId, assigneeAgentId: agentId });
+      expect(resolveFixtureCodex).toHaveBeenCalled();
     } finally {
+      resolveFixtureCodex.mockRestore();
       // onSession(null) quarantines the runtime owner before close finishes;
       // keep every published handle so an assertion/error cannot lose cleanup.
       if (firstSession) ownedSessions.add(firstSession);

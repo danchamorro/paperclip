@@ -5,8 +5,10 @@ This branch preserves the tested fleet changes on upstream release `v2026.1023.0
 `https://github.com/paperclipai/paperclip`; this fork is
 `https://github.com/danchamorro/paperclip`.
 
+Start with [FLEET-STATUS.md](FLEET-STATUS.md) for current progress and next steps.
 Current validation limits are recorded in [FLEET-VALIDATION.md](FLEET-VALIDATION.md).
-This is a trial branch, not a deployment-ready release.
+This remains a trial branch. The bounded Dell deployment and its remaining
+qualification limits are recorded there; it is not a general production release.
 
 ## Deliberate differences
 
@@ -24,6 +26,18 @@ This is a trial branch, not a deployment-ready release.
   task routes, instead of becoming generic HTTP 500 errors.
 - A disconnected sandbox proxy client cannot crash the controller with an
   unhandled socket error.
+- When CLI workers use network allowlisting, their shell environment retains the
+  proxy variables injected by the sandbox launcher. Do not save those worker-only
+  proxy URLs in agent configuration: the subscription startup probe runs on the
+  host, outside that proxy. Existing credential exclusions remain in force.
+- Local Codex workspace sandboxes project the controller-resolved Git metadata
+  directories read/write and the current run's managed GitHub launcher read-only,
+  with its `gh-config` scratch directory writable. The inner Codex sandbox gets
+  the same Git roots. Invalid roots and another run's launcher path are rejected.
+  Shells retain the scoped GitHub broker token, not arbitrary configured secrets.
+  Git metadata is shared repository state; this is not isolation between branches
+  at the Git object/ref level. The sibling checkout files remain outside the
+  tested workspace boundary.
 - `scripts/fleet/paperclip-bwrap-compat.py` is the fail-closed Linux merged-/usr
   wrapper used by the acceptance deployment. It preserves namespace, network and
   workspace restrictions while matching the host's four /usr aliases and avoiding
@@ -78,8 +92,18 @@ one execution receipt. The disposable database, connector, networks and credenti
 were removed afterward; task history retained the evidence. This demonstrates the
 observed execution, not exactly-once behavior across every crash or provider.
 
-The active trial deployment was patched in its pinned installed runtime. Creating
-this source branch does not switch that running service to a source-built release.
+The current deployment is `2026.1023.0-fleet.94f5ed2.git1`, promoted at
+2026-11-02 00:51 UTC. It contains base `94f5ed2` plus the qualified source patch.
+The local consolidation commit preserves those source bytes; it does not rebuild
+or relabel the deployed package. See [FLEET-VALIDATION.md](FLEET-VALIDATION.md)
+for aggregate Linux qualification and two completed coding deliveries.
+
+The initial trial deployment was patched in its pinned installed runtime. On
+2026-11-01 the packaged candidate `2026.1023.0-fleet.94f5ed2.proxy1` was promoted
+on Dell01 after isolated acceptance. Its package manifest records base commit
+`94f5ed2` plus the SHA256 of the uncommitted source patch. The prior runtime,
+verified instance snapshot, source bundle and rollback script are retained on Dell.
+See the deployment record in `~/.paperclip/local-trial/releases/` on that host.
 Do not run source development mode against an existing instance database. Promote
 only a verified packaged build with a backup and an explicit rollback path.
 
@@ -93,3 +117,34 @@ releases into a separate candidate branch, reconcile the small source diff, run 
 same regressions and repeat a fresh human approval before promotion. Preserve the
 upstream license and attribution. Never commit instance configuration, credentials,
 authentication files, database dumps or customer task evidence.
+
+## Dell service operation
+
+The user service remains `paperclipai.service`, with the same private Tailscale
+URL and instance database. The launcher selects a versioned release beneath
+`~/.paperclip/local-trial/releases/`; the previous `runtime/` directory is retained.
+Both worker configurations mount the selected release's Paperclip skill and omit
+saved HTTP proxy variables. Filesystem and network restrictions remain enabled.
+
+A scoped systemd drop-in uses `KillMode=mixed`: SIGTERM reaches the controller
+first so it can drain workers before stopping embedded PostgreSQL. systemd still
+kills the full cgroup if the existing 300-second stop timeout expires. The former
+control-group setting reproduced a database-shutdown error during the drain; the
+corrected shutdown completed without that error.
+
+Anonymous health responses deliberately hide the version. Check public readiness
+and build commit, then verify the exact version through the authenticated API.
+An initial rollout guard incorrectly required the hidden fields and automatically
+restored the old launcher; that failed attempt is retained in the deployment record.
+
+For the earlier `proxy1` candidate, `rollback.py --restore-snapshot` in the release directory stops
+the service, preserves post-promotion instance data separately, restores the
+verified pre-promotion snapshot and previous launcher, and restarts the service.
+It retains the corrected systemd shutdown setting. Run it only as an authorized
+rollback after checking for active work; it returns task state to the snapshot.
+The earlier archive was extracted and all 3,978 file hashes matched. The later
+`git1` promotion separately verified all 4,205 extracted file hashes and retained
+the `proxy1` runtime. Its backup is
+`~/.paperclip/local-trial/promotion-backups/20261102T005111Z` on Dell. Consult the
+matching release record before rollback; do not apply an older snapshot casually.
+Neither check is a full disaster-recovery rehearsal on a separate host.

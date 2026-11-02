@@ -1,5 +1,9 @@
 import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { buildLocalProcessSandboxSpawnTarget } from "@paperclipai/adapter-utils/local-process-sandbox";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -52,12 +56,14 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
   );
   return {
     ...actual,
+    runAdapterExecutionTargetProcess: vi.fn(actual.runAdapterExecutionTargetProcess),
     prepareAdapterExecutionTargetRuntime,
     startAdapterExecutionTargetPaperclipBridge,
   };
 });
 
 import { execute } from "./execute.js";
+import { runAdapterExecutionTargetProcess } from "@paperclipai/adapter-utils/execution-target";
 
 // Mirror the sandbox core's restore closure: capture the assets `execute()`
 // declares, then during teardown invoke each asset's `restore` with an injected
@@ -118,7 +124,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     );
   }
 
-  async function runTeardown(input: { sandboxAuth: string; hostAuth: string; onProviderStopped?: () => Promise<void>; withIdentity?: boolean }) {
+  async function runTeardown(input: { sandboxAuth: string; hostAuth: string; onProviderStopped?: () => Promise<void>; withIdentity?: boolean; networkScope?: "allowlist"; local?: boolean; managedGit?: boolean; gitEnv?: Record<string, string> }) {
     const rootDir = await mkdtemp(
       path.join(os.tmpdir(), "paperclip-codex-copyback-e2e-"),
     );
@@ -130,6 +136,14 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     const sharedHostHome = path.join(rootDir, "shared-codex-home");
     await mkdir(workspaceDir, { recursive: true });
     await mkdir(sharedHostHome, { recursive: true });
+    if (input.local && input.managedGit) {
+      const owner = path.join(rootDir, "owner");
+      await mkdir(owner);
+      const git = async (...args: string[]) => promisify(execFile)("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", ...args], { cwd: owner });
+      await git("init", "-b", "fixture-main");
+      await git("commit", "--allow-empty", "-m", "fixture");
+      await git("worktree", "add", "-b", "fixture-job", workspaceDir);
+    }
     const hostAuthPath = path.join(sharedHostHome, "auth.json");
     await writeFile(hostAuthPath, input.hostAuth, { mode: 0o600 });
 
@@ -157,9 +171,11 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
       config: {
         command: "codex",
         engine: "cli",
+        networkScope: input.networkScope,
+        ...(input.local ? { filesystemScope: "workspace" } : {}),
         // External CODEX_HOME (outside the managed company tree) so no managed
         // seeding rewrites auth.json before teardown; equals the shared host home.
-        env: { CODEX_HOME: sharedHostHome, ...(input.withIdentity ? { MY_SERVICE_TOKEN: "assigned-tool-token" } : {}) },
+        env: { CODEX_HOME: sharedHostHome, ...(input.withIdentity ? { MY_SERVICE_TOKEN: "assigned-tool-token" } : {}), ...(input.managedGit ? { PAPERCLIP_GITHUB_BROKER_TOKEN: "scoped-github-capability", PAPERCLIP_GITHUB_AUTH_MODE: "managed", PAPERCLIP_GITHUB_LAUNCHER_DIR: path.join(os.tmpdir(), "paperclip-github-runtime", "run-copyback-e2e"), PAPERCLIP_GIT_METADATA_ROOTS: JSON.stringify([path.join(rootDir, "owner", ".git")]) } : {}), ...input.gitEnv },
       },
       context: {
         paperclipWorkspace: {
@@ -167,7 +183,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
           source: "project_primary",
         },
       },
-      executionTransport: {
+      executionTransport: input.local ? undefined : {
         remoteExecution: {
           host: "127.0.0.1",
           port: 2222,
@@ -184,26 +200,71 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
 
     return {
       commandArgs,
+      rootDir,
+      processInput: vi.mocked(runAdapterExecutionTargetProcess).mock.calls.at(-1)![4],
       finalHostAuth: await readFile(hostAuthPath, "utf8"),
       finalHostMode: (await lstat(hostAuthPath)).mode & 0o777,
       executionResult,
     };
   }
 
-  it("keeps identity and scoped API access without exposing configured service tokens to CLI shells", async () => {
+  it("keeps identity, scoped API access and sandbox proxies without exposing service tokens to CLI shells", async () => {
     vi.stubEnv("DATABASE_URL", "postgres://operator:host-password@host/private");
     vi.stubEnv("HOST_DATABASE_PASSWORD", "host-password");
-    const { commandArgs } = await runTeardown({ sandboxAuth: "{}", hostAuth: "{}", withIdentity: true });
+    const { commandArgs } = await runTeardown({ sandboxAuth: "{}", hostAuth: "{}", withIdentity: true, networkScope: "allowlist" });
     const policy = commandArgs.find(arg => arg.startsWith("shell_environment_policy.include_only="));
     const keys = JSON.parse(policy!.slice(policy!.indexOf("=") + 1));
     expect(keys).toEqual(expect.arrayContaining([
       "PAPERCLIP_API_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY",
+      "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy",
     ]));
     expect(keys).not.toContain("MY_SERVICE_TOKEN");
     expect(keys).not.toContain("DATABASE_URL");
     expect(keys).not.toContain("HOST_DATABASE_PASSWORD");
     expect(commandArgs.join(" ")).not.toContain("assigned-run-token");
     expect(commandArgs.join(" ")).not.toContain("assigned-tool-token");
+  });
+
+  it("keeps managed Git operations usable inside a local worktree sandbox", async () => {
+    const { commandArgs, rootDir, processInput } = await runTeardown({ sandboxAuth: "{}", hostAuth: "{}", withIdentity: true, networkScope: "allowlist", local: true, managedGit: true });
+    const metadata = path.join(rootDir, "owner", ".git");
+    const launcher = path.join(os.tmpdir(), "paperclip-github-runtime", "run-copyback-e2e");
+    expect(processInput.localProcessSandbox?.managedPaths).toEqual(expect.arrayContaining([
+      { path: metadata, access: "rw" },
+      { path: launcher, access: "ro" },
+      { path: path.join(launcher, "gh-config"), access: "rw" },
+    ]));
+    const policy = commandArgs.find(arg => arg.startsWith("shell_environment_policy.include_only="))!;
+    const keys = JSON.parse(policy.slice(policy.indexOf("=") + 1));
+    expect(keys).toContain("PAPERCLIP_GITHUB_BROKER_TOKEN");
+    expect(keys).not.toContain("MY_SERVICE_TOKEN");
+    expect(commandArgs).toContain(metadata);
+    expect(commandArgs.join(" ")).not.toContain("scoped-github-capability");
+  });
+
+  it.each<Record<string, string>>([
+    { PAPERCLIP_GIT_METADATA_ROOTS: '["/"]' },
+    { PAPERCLIP_GIT_METADATA_ROOTS: '["relative"]' },
+    { PAPERCLIP_GITHUB_LAUNCHER_DIR: "/another-run" },
+  ])("rejects invalid controller Git projections: %j", async (gitEnv) => {
+    await expect(runTeardown({ sandboxAuth: "{}", hostAuth: "{}", local: true, managedGit: true, gitEnv })).rejects.toThrow(/Invalid controller Git|does not belong/);
+  });
+
+  it.runIf(process.platform === "linux")("can commit in the assigned worktree without exposing its sibling checkout", async () => {
+    const { rootDir, processInput } = await runTeardown({ sandboxAuth: "{}", hostAuth: "{}", local: true, managedGit: true });
+    const workspace = path.join(rootDir, "workspace");
+    const hidden = path.join(rootDir, "owner", "operator-only.txt");
+    await writeFile(hidden, "synthetic operator data");
+    const target = await buildLocalProcessSandboxSpawnTarget({
+      executable: "/usr/bin/bash", args: ["-c", 'git -c user.name=Fixture -c user.email=fixture@example.invalid commit --allow-empty -m sandbox-proof && test ! -e "$1"', "fixture", hidden], cwd: workspace,
+      options: { ...processInput.localProcessSandbox!, command: fileURLToPath(new URL("../../../../../scripts/fleet/paperclip-bwrap-compat.py", import.meta.url)) },
+    });
+    try {
+      const result = await promisify(execFile)(target.command, target.args, { cwd: workspace, env: { PATH: "/usr/bin:/bin", ...target.env }, timeout: 15000 });
+      expect(result.stdout).toContain("sandbox-proof");
+      const head = await promisify(execFile)("git", ["log", "-1", "--format=%s"], { cwd: workspace });
+      expect(head.stdout.trim()).toBe("sandbox-proof");
+    } finally { await target.cleanup?.(); }
   });
 
   it("collects stopped-provider instruction edits before a throwing remote restore", async () => {
